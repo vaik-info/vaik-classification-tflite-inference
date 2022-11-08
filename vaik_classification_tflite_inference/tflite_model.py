@@ -84,18 +84,3 @@ class TfliteModel:
                 output = scale * (output - zero_point)
             output_tensor.append(output)
         return output_tensor
-
-
-import os
-
-from vaik_classification_tflite_inference.tflite_model import TfliteModel
-
-input_saved_model_dir_path = os.path.expanduser('~/output_tflite_model/mnist_mobile_net_v2.tflite')
-classes = ('zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine')
-image = np.asarray(
-    Image.open(os.path.expanduser('~/.vaik-mnist-classification-dataset/valid/eight/valid_000000024.jpg')).convert(
-        'RGB'))
-
-model = TfliteModel(input_saved_model_dir_path, classes)
-objects_dict, raw_pred = model.inference(image)
-print(objects_dict)
