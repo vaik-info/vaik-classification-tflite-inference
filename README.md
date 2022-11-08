@@ -63,13 +63,7 @@ dtype=float32),
     'seven',
     'one'
 ]
-},
-・・・
-,
-'one'
-]
 }
-
 ```
 
 - raw_pred
