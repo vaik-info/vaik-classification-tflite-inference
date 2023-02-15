@@ -3,12 +3,17 @@ import multiprocessing
 import platform
 from PIL import Image
 import numpy as np
+import json
 import tflite_runtime.interpreter as tflite
 
 
 class TfliteModel:
-    def __init__(self, input_saved_model_path: str = None, classes: Tuple = None, num_thread: int = None):
+    def __init__(self, input_saved_model_path: str = None, classes: Tuple = None,
+                 feature_divide_num=16, softmax_threshold=0.01, num_thread: int = None):
         self.classes = classes
+        self.blank_index = len(classes) - 1
+        self.feature_divide_num = feature_divide_num
+        self.softmax_threshold = softmax_threshold
         num_thread = multiprocessing.cpu_count() if num_thread is None else num_thread
         self.__load(input_saved_model_path, num_thread)
 
@@ -62,10 +67,11 @@ class TfliteModel:
         raw_pred = self.__get_output_tensor()[0]
         return raw_pred
 
-    def __output_parse(self, pred: np.ndarray) -> Dict:
-        pred_index = np.argsort(-pred)
-        output_dict = {'score': pred[0][pred_index[0]].tolist(),
-                       'label': [self.classes[class_index] for class_index in pred_index[0]]}
+    def __output_parse(self, raw_pred: np.ndarray) -> Dict:
+        text, label_indexes, score = self.__decode(raw_pred)
+        output_dict = {'text': text,
+                       'classes': label_indexes,
+                       'scores': score}
         return output_dict
 
     def __set_input_tensor(self, image: np.ndarray):
@@ -84,3 +90,51 @@ class TfliteModel:
                 output = scale * (output - zero_point)
             output_tensor.append(output)
         return output_tensor
+
+    @classmethod
+    def char_json_read(cls, char_json_path):
+        with open(char_json_path, 'r') as f:
+            json_dict = json.load(f)
+        classes = []
+        for character_dict in json_dict['character']:
+            classes.extend(character_dict['classes'])
+        return classes
+
+    def __softmax(self, matrix):
+        return np.exp(matrix) / np.sum(np.exp(matrix))
+
+    def __decode(self, raw_pred):
+        threshold_pred = np.copy(raw_pred)
+        threshold_pred_min, threshold_pred_max = np.min(threshold_pred), np.max(threshold_pred)
+        threshold_blank_max = np.max(threshold_pred[:, :, -1])
+
+        threshold_pred_softmax = self.__softmax((raw_pred - threshold_pred_min + threshold_pred_max))
+        threshold_pred[threshold_pred_softmax < self.softmax_threshold] = threshold_pred_min
+        for batch_index in range(raw_pred.shape[0]):
+            for width_index in range(raw_pred.shape[1]):
+                if np.max(threshold_pred[batch_index, width_index, :]) == threshold_pred_min:
+                    threshold_pred[batch_index, width_index, self.blank_index] = threshold_blank_max
+        threshold_pred_arg_max = np.argmax(threshold_pred, axis=-1)
+        threshold_pred_arg_max_overlap_filtered = threshold_pred_arg_max[0][
+            np.insert(~(threshold_pred_arg_max[0][:-1] == threshold_pred_arg_max[0][1:]), 0, True)]
+        threshold_pred_softmax_overlap_filtered = np.max(threshold_pred_softmax[0][np.insert(
+            ~(threshold_pred_arg_max[0][:-1] == threshold_pred_arg_max[0][1:]), 0, True)], axis=-1)
+        text, label_indexes, score = self.__decode2labels(threshold_pred_arg_max_overlap_filtered,
+                                                          threshold_pred_softmax_overlap_filtered)
+        return text, label_indexes, score
+
+    def __decode2labels(self, threshold_pred_arg_max_overlap_filtered, threshold_pred_softmax_overlap_filtered):
+        labels = ""
+        label_indexes = []
+        scores = []
+        for index, label_index in enumerate(threshold_pred_arg_max_overlap_filtered):
+            if label_index == self.blank_index:
+                continue
+            labels += self.classes[label_index]
+            label_indexes.append(int(label_index))
+            scores.append(threshold_pred_softmax_overlap_filtered[index])
+        return labels, label_indexes, np.prod(scores)
+
+    def __softmax(self, x, axis=-1):
+        e_x = np.exp(x - np.max(x, axis=axis, keepdims=True))
+        return e_x / np.sum(e_x, axis=axis, keepdims=True)
